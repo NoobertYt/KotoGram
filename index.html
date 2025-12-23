@@ -24,13 +24,11 @@
             setDoc,
             doc,
             updateDoc,
-            deleteDoc,
             query,
             where,
             onSnapshot,
             orderBy,
             serverTimestamp,
-            Timestamp,
             increment,
             runTransaction
         } from "https://www.gstatic.com/firebasejs/9.22.0/firebase-firestore.js";
@@ -74,7 +72,6 @@
             setDoc,
             doc,
             updateDoc,
-            deleteDoc,
             query,
             where,
             onSnapshot,
@@ -83,7 +80,6 @@
             ref,
             uploadBytes,
             getDownloadURL,
-            Timestamp,
             increment,
             runTransaction
         };
@@ -831,7 +827,7 @@
             margin-left: 10px;
         }
 
-        /* Модальные окна - ФИКС ПОЗИЦИОНИРОВАНИЯ */
+        /* Модальные окна */
         .modal-overlay {
             position: fixed;
             top: 0;
@@ -1630,7 +1626,7 @@
                 });
             } else {
                 // Firebase не загрузился, показываем ошибку
-                showError('Ошибка загрузки Firebase. Пожалуйста, обновите страницу.');
+                showToast('Ошибка загрузки Firebase. Пожалуйста, обновите страницу.', 'error');
                 document.getElementById('loadingScreen').classList.add('hidden');
                 document.getElementById('authScreen').classList.remove('hidden');
             }
@@ -1755,7 +1751,7 @@
 
         // Регистрация пользователя
         async function register() {
-            const username = document.getElementById('regUsername').value.trim();
+            const username = document.getElementById('regUsername').value.trim().toLowerCase();
             const email = document.getElementById('regEmail').value.trim();
             const password = document.getElementById('regPassword').value;
             const confirmPassword = document.getElementById('regConfirmPassword').value;
@@ -1879,15 +1875,49 @@
             }
         }
 
+        // Функция для проверки подключения к Firebase
+        async function checkFirebaseConnection() {
+            try {
+                console.log('Checking Firebase connection...');
+                
+                // Проверяем аутентификацию
+                const auth = window.firebase.auth;
+                console.log('Auth state:', auth.currentUser);
+                
+                // Проверяем Firestore
+                const testQuery = window.firebase.query(
+                    window.firebase.collection(window.firebase.db, 'users'),
+                    window.firebase.limit(1)
+                );
+                
+                const testSnapshot = await window.firebase.getDocs(testQuery);
+                console.log('Firestore connection test:', testSnapshot.empty ? 'No users found' : 'Connected');
+                
+                return true;
+            } catch (error) {
+                console.error('Firebase connection error:', error);
+                return false;
+            }
+        }
+
         // Загрузка данных пользователя
         async function loadUserData(userId) {
             try {
+                // Проверяем подключение
+                const isConnected = await checkFirebaseConnection();
+                if (!isConnected) {
+                    showToast('Проверьте подключение к интернету', 'error');
+                    return;
+                }
+                
                 const userDoc = await window.firebase.getDoc(
                     window.firebase.doc(window.firebase.db, 'users', userId)
                 );
                 
                 if (userDoc.exists()) {
                     currentUser = { id: userId, ...userDoc.data() };
+                    console.log('User loaded:', currentUser);
+                    
                     updateUserInterface();
                     
                     // Загружаем чаты пользователя
@@ -1898,10 +1928,21 @@
                     
                     // Слушаем изменения в чатах
                     setupChatsListener();
+                } else {
+                    console.error('User document not found');
+                    showToast('Профиль пользователя не найден', 'error');
                 }
             } catch (error) {
                 console.error('Error loading user data:', error);
-                showToast('Ошибка загрузки данных пользователя', 'error');
+                console.error('Error code:', error.code);
+                console.error('Error message:', error.message);
+                
+                let errorMessage = 'Ошибка загрузки данных пользователя';
+                if (error.code === 'permission-denied') {
+                    errorMessage = 'Нет доступа к данным. Выйдите и войдите снова.';
+                }
+                
+                showToast(errorMessage, 'error');
             }
         }
 
@@ -1922,18 +1963,25 @@
             }
         }
 
-        // Загрузка чатов пользователя
+        // Загрузка чатов пользователя - ИСПРАВЛЕННАЯ ВЕРСИЯ
         async function loadUserChats() {
             try {
+                if (!currentUser || !currentUser.id) {
+                    console.error('No current user found');
+                    return;
+                }
+
+                console.log('Loading chats for user:', currentUser.id);
+                
                 const chatsQuery = window.firebase.query(
                     window.firebase.collection(window.firebase.db, 'chats'),
-                    window.firebase.where('participants', 'array-contains', currentUser.id),
-                    window.firebase.orderBy('lastMessageTime', 'desc')
+                    window.firebase.where('participants', 'array-contains', currentUser.id)
                 );
                 
                 const querySnapshot = await window.firebase.getDocs(chatsQuery);
                 const chatsList = document.getElementById('chatsList');
-                chatsList.innerHTML = '';
+                
+                console.log('Found', querySnapshot.size, 'chats');
                 
                 if (querySnapshot.empty) {
                     chatsList.innerHTML = `
@@ -1950,25 +1998,145 @@
                 const chatContainer = document.createElement('div');
                 
                 for (const doc of querySnapshot.docs) {
-                    const chat = { id: doc.id, ...doc.data() };
-                    chats.set(chat.id, chat);
+                    const chat = { 
+                        id: doc.id, 
+                        ...doc.data(),
+                        lastMessageTime: doc.data().lastMessageTime || new Date(0)
+                    };
+                    
+                    console.log('Processing chat:', chat.id, chat.participants);
                     
                     // Получаем информацию о собеседнике
                     const otherParticipantId = chat.participants.find(id => id !== currentUser.id);
                     if (otherParticipantId) {
-                        const userData = await getUserData(otherParticipantId);
-                        chat.otherUser = userData;
-                        
-                        const chatElement = createChatElement(chat);
-                        chatContainer.appendChild(chatElement);
+                        try {
+                            const userData = await getUserData(otherParticipantId);
+                            chat.otherUser = userData;
+                            
+                            const chatElement = createChatElement(chat);
+                            chatContainer.appendChild(chatElement);
+                            
+                            // Сохраняем чат в Map
+                            chats.set(chat.id, chat);
+                        } catch (userError) {
+                            console.error('Error loading user data for', otherParticipantId, userError);
+                        }
                     }
                 }
                 
+                chatsList.innerHTML = '';
                 chatsList.appendChild(chatContainer);
                 
             } catch (error) {
                 console.error('Error loading chats:', error);
-                showToast('Ошибка загрузки чатов', 'error');
+                console.error('Error details:', error.code, error.message);
+                
+                // Показываем более информативное сообщение об ошибке
+                let errorMessage = 'Ошибка загрузки чатов';
+                if (error.code === 'permission-denied') {
+                    errorMessage = 'Нет доступа к чатам. Пожалуйста, проверьте правила Firestore.';
+                    console.log('ВАЖНО: Установите следующие правила Firestore:');
+                    console.log(`
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    match /users/{userId} {
+      allow read: if request.auth != null;
+      allow write: if request.auth != null && request.auth.uid == userId;
+    }
+    
+    match /chats/{chatId} {
+      allow read: if request.auth != null && 
+        (resource.data.participants.hasAny([request.auth.uid]));
+      allow create: if request.auth != null;
+      allow update: if request.auth != null && 
+        (resource.data.participants.hasAny([request.auth.uid]));
+      
+      match /messages/{messageId} {
+        allow read: if request.auth != null && 
+          (get(/databases/$(database)/documents/chats/$(chatId)).data.participants.hasAny([request.auth.uid]));
+        allow create: if request.auth != null && 
+          (get(/databases/$(database)/documents/chats/$(chatId)).data.participants.hasAny([request.auth.uid]));
+      }
+    }
+  }
+}
+                    `);
+                } else if (error.code === 'unavailable') {
+                    errorMessage = 'Нет подключения к интернету';
+                }
+                
+                showToast(errorMessage, 'error');
+                
+                // Показываем сообщение об ошибке в интерфейсе
+                const chatsList = document.getElementById('chatsList');
+                chatsList.innerHTML = `
+                    <div class="no-chats">
+                        <i class="fas fa-exclamation-triangle" style="color: #ff4444;"></i>
+                        <h3>${errorMessage}</h3>
+                        <p>Попробуйте перезагрузить страницу</p>
+                    </div>
+                `;
+            }
+        }
+
+        // Создание тестовых данных (если нужно)
+        async function createTestData() {
+            if (!currentUser) return;
+            
+            try {
+                // Создаем тестового пользователя
+                const testUserId = 'test_user_' + Date.now();
+                const testUserData = {
+                    uid: testUserId,
+                    username: 'testuser',
+                    displayName: 'Тестовый пользователь',
+                    email: 'test@example.com',
+                    bio: 'Это тестовый аккаунт',
+                    avatarUrl: '',
+                    createdAt: window.firebase.serverTimestamp(),
+                    lastSeen: window.firebase.serverTimestamp(),
+                    status: 'online'
+                };
+                
+                await window.firebase.setDoc(
+                    window.firebase.doc(window.firebase.db, 'users', testUserId),
+                    testUserData
+                );
+                
+                // Создаем тестовый чат
+                const chatData = {
+                    participants: [currentUser.id, testUserId],
+                    createdAt: window.firebase.serverTimestamp(),
+                    lastMessage: 'Привет! Это тестовое сообщение',
+                    lastMessageTime: window.firebase.serverTimestamp(),
+                    unreadCount: 1
+                };
+                
+                const chatRef = await window.firebase.addDoc(
+                    window.firebase.collection(window.firebase.db, 'chats'),
+                    chatData
+                );
+                
+                // Добавляем тестовое сообщение
+                const messageData = {
+                    text: 'Привет! Это тестовое сообщение',
+                    senderId: testUserId,
+                    timestamp: window.firebase.serverTimestamp(),
+                    read: false
+                };
+                
+                await window.firebase.addDoc(
+                    window.firebase.collection(window.firebase.db, 'chats', chatRef.id, 'messages'),
+                    messageData
+                );
+                
+                showToast('Тестовые данные созданы', 'success');
+                await loadUserChats();
+                
+            } catch (error) {
+                console.error('Error creating test data:', error);
+                showToast('Ошибка создания тестовых данных', 'error');
             }
         }
 
@@ -1979,8 +2147,7 @@
             try {
                 const chatsQuery = window.firebase.query(
                     window.firebase.collection(window.firebase.db, 'chats'),
-                    window.firebase.where('participants', 'array-contains', currentUser.id),
-                    window.firebase.orderBy('lastMessageTime', 'desc')
+                    window.firebase.where('participants', 'array-contains', currentUser.id)
                 );
                 
                 window.firebase.onSnapshot(chatsQuery, (snapshot) => {
@@ -2235,7 +2402,7 @@
             return messageElement;
         }
 
-        // Отправка сообщения - ИСПРАВЛЕННАЯ ВЕРСИЯ
+        // Отправка сообщения
         async function sendMessage() {
             if (!currentChat) {
                 showToast('Выберите чат для отправки сообщения', 'error');
