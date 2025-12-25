@@ -1676,7 +1676,7 @@
                     await addDoc(collection(db, 'messages'), messageData);
                 } else {
                     // Отправка личного сообщения
-                    const chatId = [currentUser.uid, currentChat].sort().join('_');
+                    const chatId = getChatId(currentUser.uid, currentChat);
                     
                     const messageData = {
                         text: messageText,
@@ -1709,6 +1709,12 @@
             }
         }
 
+        // Генерация chatId для приватных сообщений
+        function getChatId(userId1, userId2) {
+            // Сортируем ID чтобы всегда получать одинаковый chatId для пары пользователей
+            return [userId1, userId2].sort().join('_');
+        }
+
         // Загрузка и отображение сообщений
         function setupMessagesListener(chatId, type = 'general') {
             // Отключаем предыдущий слушатель, если он есть
@@ -1730,7 +1736,7 @@
                 );
             } else {
                 // Личный чат - только сообщения между двумя пользователями
-                const chatIdStr = [currentUser.uid, chatId].sort().join('_');
+                const chatIdStr = getChatId(currentUser.uid, chatId);
                 messagesQuery = query(
                     collection(db, 'privateMessages'),
                     where('chatId', '==', chatIdStr),
@@ -1770,7 +1776,7 @@
         async function markMessagesAsRead(userId) {
             if (!currentUser) return;
             
-            const chatId = [currentUser.uid, userId].sort().join('_');
+            const chatId = getChatId(currentUser.uid, userId);
             const messagesQuery = query(
                 collection(db, 'privateMessages'),
                 where('chatId', '==', chatId),
