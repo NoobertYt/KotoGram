@@ -910,9 +910,7 @@
             setDoc,
             getDoc,
             updateDoc,
-            arrayUnion,
-            arrayRemove,
-            limit
+            arrayUnion
         } from "https://www.gstatic.com/firebasejs/10.7.1/firebase-firestore.js";
 
         // Конфигурация Firebase
@@ -978,6 +976,7 @@
         let selectedAvatarColor = '#6366f1';
         let selectedStatus = 'online';
         let unreadMessages = {};
+        let messageListener = null;
 
         // Цвета для аватарок
         const avatarColorsList = [
@@ -1386,32 +1385,43 @@
             try {
                 if (currentChat === 'general') {
                     // Отправка в общий чат
-                    await addDoc(collection(db, 'messages'), {
+                    const messageData = {
                         text: messageText,
                         senderId: currentUser.uid,
                         senderName: currentUser.displayName || currentUser.email,
-                        senderAvatarColor: currentUser.userData?.avatarColor,
-                        senderAvatar: currentUser.userData?.avatarBase64,
+                        senderAvatarColor: currentUser.userData?.avatarColor || '#6366f1',
                         chatType: 'general',
                         timestamp: serverTimestamp(),
                         readBy: [currentUser.uid]
-                    });
+                    };
+                    
+                    // Добавляем аватар только если он есть
+                    if (currentUser.userData?.avatarBase64) {
+                        messageData.senderAvatar = currentUser.userData.avatarBase64;
+                    }
+                    
+                    await addDoc(collection(db, 'messages'), messageData);
                 } else {
                     // Отправка личного сообщения
                     const chatId = [currentUser.uid, currentChat].sort().join('_');
                     
-                    await addDoc(collection(db, 'privateMessages'), {
+                    const messageData = {
                         text: messageText,
                         senderId: currentUser.uid,
                         senderName: currentUser.displayName || currentUser.email,
-                        senderAvatarColor: currentUser.userData?.avatarColor,
-                        senderAvatar: currentUser.userData?.avatarBase64,
+                        senderAvatarColor: currentUser.userData?.avatarColor || '#6366f1',
                         receiverId: currentChat,
                         chatId: chatId,
                         timestamp: serverTimestamp(),
-                        read: false,
-                        readBy: [currentUser.uid]
-                    });
+                        read: false
+                    };
+                    
+                    // Добавляем аватар только если он есть
+                    if (currentUser.userData?.avatarBase64) {
+                        messageData.senderAvatar = currentUser.userData.avatarBase64;
+                    }
+                    
+                    await addDoc(collection(db, 'privateMessages'), messageData);
                     
                     // Сбрасываем счетчик непрочитанных для этого чата
                     unreadMessages[currentChat] = 0;
@@ -1428,31 +1438,37 @@
 
         // Загрузка и отображение сообщений
         function setupMessagesListener(chatId, type = 'general') {
+            // Отключаем предыдущий слушатель, если он есть
+            if (messageListener) {
+                messageListener();
+            }
+            
             // Очищаем контейнер
             messagesContainer.innerHTML = '';
             
             let messagesQuery;
             
             if (type === 'general') {
+                // Общий чат - все сообщения
                 messagesQuery = query(
                     collection(db, 'messages'), 
-                    orderBy('timestamp', 'asc'),
-                    limit(100)
+                    orderBy('timestamp', 'asc')
                 );
             } else {
+                // Личный чат - только сообщения между двумя пользователями
                 const chatIdStr = [currentUser.uid, chatId].sort().join('_');
                 messagesQuery = query(
                     collection(db, 'privateMessages'),
                     where('chatId', '==', chatIdStr),
-                    orderBy('timestamp', 'asc'),
-                    limit(100)
+                    orderBy('timestamp', 'asc')
                 );
                 
                 // Помечаем сообщения как прочитанные
                 markMessagesAsRead(chatId);
             }
             
-            onSnapshot(messagesQuery, (snapshot) => {
+            // Устанавливаем новый слушатель
+            messageListener = onSnapshot(messagesQuery, (snapshot) => {
                 messagesContainer.innerHTML = '';
                 
                 if (snapshot.empty) {
@@ -1469,6 +1485,8 @@
                 
                 // Прокрутка к последнему сообщению
                 messagesContainer.scrollTop = messagesContainer.scrollHeight;
+            }, (error) => {
+                console.error('Ошибка слушателя сообщений:', error);
             });
         }
 
@@ -1485,19 +1503,24 @@
             
             try {
                 const querySnapshot = await getDocs(messagesQuery);
-                const batch = [];
+                const updatePromises = [];
                 
                 querySnapshot.forEach((docSnap) => {
                     const message = docSnap.data();
+                    // Если сообщение еще не прочитано текущим пользователем
                     if (!message.readBy || !message.readBy.includes(currentUser.uid)) {
-                        batch.push(updateDoc(doc(db, 'privateMessages', docSnap.id), {
-                            readBy: arrayUnion(currentUser.uid)
-                        }));
+                        updatePromises.push(
+                            updateDoc(doc(db, 'privateMessages', docSnap.id), {
+                                readBy: arrayUnion(currentUser.uid)
+                            })
+                        );
                     }
                 });
                 
                 // Выполняем все обновления
-                await Promise.all(batch);
+                if (updatePromises.length > 0) {
+                    await Promise.all(updatePromises);
+                }
                 
             } catch (error) {
                 console.error('Ошибка пометки сообщений как прочитанных:', error);
@@ -1619,22 +1642,25 @@
             
             const unreadQuery = query(
                 collection(db, 'privateMessages'),
-                where('receiverId', '==', currentUser.uid),
-                where('readBy', 'array-contains', currentUser.uid)
+                where('receiverId', '==', currentUser.uid)
             );
             
             onSnapshot(unreadQuery, (snapshot) => {
+                // Сбрасываем счетчики
                 unreadMessages = {};
                 
                 snapshot.forEach((doc) => {
                     const message = doc.data();
                     const senderId = message.senderId;
                     
+                    if (senderId === currentUser.uid) return; // Пропускаем свои сообщения
+                    
                     if (!unreadMessages[senderId]) {
                         unreadMessages[senderId] = 0;
                     }
                     
                     // Если сообщение не прочитано текущим пользователем
+                    // Проверяем поле readBy вместо read
                     if (!message.readBy || !message.readBy.includes(currentUser.uid)) {
                         unreadMessages[senderId]++;
                     }
@@ -1769,6 +1795,12 @@
                 chatInterface.style.display = 'none';
                 messagesContainer.innerHTML = '';
                 usersListContainer.innerHTML = '';
+                
+                // Отключаем слушатели
+                if (messageListener) {
+                    messageListener();
+                    messageListener = null;
+                }
                 
                 // Сбрасываем формы
                 loginForm.reset();
